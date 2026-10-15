@@ -1,0 +1,17 @@
+# Staci 8.2 POC - install with: pip install -r requirements.txt
+# Versions are the ones the POC was tested with.
+
+# data
+pandas==2.3.3
+numpy==2.4.6
+
+# models
+lightgbm==4.7.0
+scikit-learn==1.9.1        # needed by lightgbm's LGBMRegressor
+xgboost==3.2.0
+statsforecast==2.1.1
+chronos-forecasting==2.3.2 # also installs torch (~1-2 GB); downloads amazon/chronos-2 weights on first run
+
+# config and Excel output
+python-dotenv==1.2.4
+openpyxl==3.1.5

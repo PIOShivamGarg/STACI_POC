@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+data/
+outputs/
+
+# generated Excel workbooks (rebuild with build_xlsx.py)
+*.xlsx
+~$*
+
+# client proposal - keep out of the public repo
+Docs/
+
+# Python cache
+__pycache__/
+*.pyc
