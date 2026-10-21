@@ -18,7 +18,7 @@ DELIVERABLES = {   # summary.json section -> (deliverable, what is compared)
     "sku_demand": ("Base: SKU demand", "units per SKU per week"),
 }
 MEASURES = {"model": ("WAPE (error)", "lower"), "p90_coverage": ("P90 coverage", "close to 90%")}
-RISK_STATES = ["RED", "AMBER", "GREEN", "BLUE"]
+RISK_STATES = ["High risk", "Watch", "Monitor", "Healthy", "Possible overstock"]
 
 
 def load_json(path):

@@ -18,6 +18,7 @@ WORKBOOK = f"Staci_8.2_POC_{MODEL}.xlsx"
 RESULT_SHEETS = {
     "inventory_risk": f"{OUT_DIR}/inventory_risk.csv",
     "order_volume_forecast": f"{OUT_DIR}/order_volume_forecast.csv",
+    "forecast_vs_actual": f"{OUT_DIR}/forecast_vs_actual.csv",
     "sku_forecast": f"{OUT_DIR}/sku_forecast.csv",
     "backtest_accuracy": f"{OUT_DIR}/backtest_accuracy.csv",
     "feature_importance": f"{OUT_DIR}/feature_importance.csv",
@@ -30,7 +31,7 @@ BOLD_FONT = Font(name="Arial", size=10, bold=True)
 HEADER_FONT = Font(name="Arial", size=10, bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 RISK_FILLS = {state: PatternFill("solid", fgColor=color)
-              for state, color in {"RED": "F8CBAD", "AMBER": "FFE699", "GREEN": "C6EFCE", "BLUE": "BDD7EE"}.items()}
+              for state, color in {"High risk": "F8CBAD", "Watch": "FFE699", "Monitor": "DDEBF7", "Healthy": "C6EFCE", "Possible overstock": "D9D9D9"}.items()}
 STYLE_ROW_LIMIT = 5000        # skip per-cell fonts on bigger sheets (daily_demand) - too slow
 WIDTH_SAMPLE_ROWS = 200       # rows sampled to size each column
 MODEL_NAME = {"lgbm": "LightGBM", "xgboost": "XGBoost", "chronos": "Chronos-2",
@@ -79,7 +80,7 @@ def readme_sheet():
         ("INPUT inbound_asn", "Open / in-transit inbound shipments with expected arrival date and qty"),
         ("INPUT events", "Known promotions and peak periods (Black Friday etc.)"),
         ("OUTPUT inventory_risk", "One row per SKU: days of cover, projected stockout date (P50 / P90), "
-                                  "RED/AMBER/GREEN/BLUE state, reason, suggested reorder qty"),
+                                  "risk level, reason, suggested reorder qty"),
         ("OUTPUT order_volume_forecast", "Weekly units and orders (P50 / P90) per client / warehouse / channel "
                                          "- for labour and capacity planning"),
         ("OUTPUT sku_forecast", "Weekly SKU demand P50 / P90 for next 13 weeks, with created_at and "
@@ -87,8 +88,8 @@ def readme_sheet():
         ("OUTPUT backtest_accuracy", f"Per-SKU forecast vs actual for two historical windows, {MODEL_NAME} vs naive"),
         ("OUTPUT feature_importance", f"Which inputs drive the {MODEL_NAME} P50 forecast (share of total gain); "
                                       "tree models only"),
-        ("Risk states", "RED = runs out before stock can arrive; AMBER = reorder now; GREEN = covered; "
-                        "BLUE = excess (>90 days cover)"),
+        ("Risk levels", "By days of cover (as in the portal mockup): High risk <14; Watch 14-30; Monitor 30-60; "
+                        "Healthy 60-120; Possible overstock 120+. Shortfall risk = High risk + Watch"),
     ]
     return pd.DataFrame(rows, columns=["Item", "Detail"])
 

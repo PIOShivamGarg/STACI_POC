@@ -3,7 +3,7 @@
 Proof of concept for two forecasts a 3PL warehouse needs:
 
 1. **Order Volume:** how many orders each client / warehouse / sales channel will receive per week, 1–13 weeks ahead (staff and capacity planning).
-2. **Shortfall Risk:** which items are likely to run out before replenishment can arrive, with a projected stockout date, a RED / AMBER / GREEN / BLUE state, a reason and a suggested reorder quantity.
+2. **Shortfall Risk:** which items are likely to run out before replenishment can arrive, with a projected stockout date, a risk level (High risk / Watch / Monitor / Healthy / Possible overstock), a reason and a suggested reorder quantity.
 
 Both are built from one weekly **SKU demand forecast** with two figures per item and week:
 - **P50:** the likely figure.
@@ -46,7 +46,8 @@ All four are free and open source. Adding a model means one file in `models/` an
 
 ```
 data/ ──► forecast.py ──► sku_forecast.csv ──► risk.py ──► order_volume_forecast.csv
-                                                     └───► inventory_risk.csv
+                                                     ├───► inventory_risk.csv
+                                                     └───► forecast_vs_actual.csv
 ```
 
 - **`forecast.py`**
@@ -55,12 +56,15 @@ data/ ──► forecast.py ──► sku_forecast.csv ──► risk.py ──�
   - **Backtests** on two past windows, the last 13 weeks and last year's peak season. For each window it pretends to be at an earlier date, forecasts, and compares the forecast with what actually happened.
 - **`risk.py`**
   - **Order volume:** converts units to orders using each SKU's recent orders-per-unit ratio, then sums by client, warehouse, channel and week.
-  - **Shortfall risk:** projects each SKU's stock day by day as `available − forecast demand + inbound ASNs`. The first day the balance goes below zero is the stockout date. States:
-    - **RED:** runs out before stock can arrive.
-    - **AMBER:** reorder now.
-    - **GREEN:** covered.
-    - **BLUE:** excess, more than 90 days of cover.
-  - Reorder quantities are sized on P90.
+  - **Shortfall risk:** projects each SKU's stock day by day as `available − forecast demand + inbound ASNs` to find the stockout date. The risk level follows the Customer Portal mockup and is set by days of cover (available ÷ average daily forecast demand over the next 4 weeks):
+    - **High risk:** under 14 days.
+    - **Watch:** 14 to 30 days.
+    - **Monitor:** 30 to 60 days.
+    - **Healthy:** 60 to 120 days.
+    - **Possible overstock:** 120 days or more.
+    - **SKUs at shortfall risk** = High risk + Watch (under 30 days), reported as `shortfall_risk_skus`.
+    - The reason text adds the projected stockout date and whether an inbound ASN arrives before it.
+  - Reorder quantities are sized on P90 and given for High risk, Watch and Monitor items.
 
 ## Outputs
 
@@ -70,7 +74,8 @@ data/ ──► forecast.py ──► sku_forecast.csv ──► risk.py ──�
 |---|---|
 | `sku_forecast.csv` | Weekly P50 / P90 per SKU for the next 13 weeks |
 | `order_volume_forecast.csv` | Weekly units and orders (P50 / P90) per client / warehouse / channel |
-| `inventory_risk.csv` | One row per SKU: available stock, days of cover, stockout dates, risk state, reason, reorder qty |
+| `inventory_risk.csv` | One row per SKU: available stock, days of cover, stockout dates, risk level, reason, reorder qty, and the next open ASN (`covered_by_asn`, `next_asn_date`, `asn_arrives_in_time`) |
+| `forecast_vs_actual.csv` | Last 14 days per client / warehouse: orders received vs forecast (average of the same weekday in the 4 weeks before), variance %, and status (On track within ±10%, Watch 10–20%, Off track over 20%) |
 | `backtest_accuracy.csv` | Per-SKU forecast vs actual on both backtest windows |
 | `feature_importance.csv` | Which features drive the model (LightGBM / XGBoost only) |
 | `summary.json` | Backtest scores for SKU demand, Order Volume and Shortfall Risk |
@@ -98,7 +103,7 @@ WAPE, normal weeks / peak season (lower is better):
   - LightGBM and XGBoost lead on Order Volume.
   - Chronos-2 is the most consistent on Shortfall Risk.
   - The statistical baseline is strong in peak season but doesn't beat naive in normal weeks.
-- **All models flag the same 12 RED items.**
+- **All models flag the same 11 High risk items.**
 - **Known weak spots, shared by every model:**
   - P90 coverage at SKU level in peak season is about 72–77%, below the 90% target.
   - Slow-moving SKUs have high weekly error.

@@ -3,8 +3,9 @@
 Reads the SKU forecast written by forecast.py plus data/, for the model chosen in .env
 (FORECAST_MODEL), and writes to outputs/<model>/:
   order_volume_forecast.csv  weekly units and orders (P50 / P90) per client / warehouse / channel
-  inventory_risk.csv         one row per SKU: days of cover, stockout dates, RED/AMBER/GREEN/BLUE, reorder qty
-  risk_summary.json          count of SKUs in each risk state
+  inventory_risk.csv         one row per SKU: days of cover, stockout dates, risk level, reorder qty
+  forecast_vs_actual.csv     daily orders received vs forecast, last 14 days, per client / warehouse
+  risk_summary.json          count of SKUs per risk level, SKUs at shortfall risk (under 30 days), forecast-vs-actual status
 
 The risk logic does not depend on which model produced the forecast.
 """
@@ -21,10 +22,18 @@ FORECAST_FILE = f"{OUT_DIR}/sku_forecast.csv"
 ORDER_RATIO_DAYS = 56          # recent history used for the orders-per-unit ratio
 DEFAULT_ORDERS_PER_UNIT = 0.5  # used when a SKU shipped nothing recently
 USAGE_DAYS = 28                # "average daily usage" = mean P50 demand over the next 4 weeks
-EXCESS_COVER_DAYS = 90         # more cover than this = BLUE (excess)
+# Risk levels follow the Staci Customer Portal mockup (Forecasting tab), by days of cover:
+HIGH_RISK_DAYS = 14            # under 14 days of stock  = High risk
+WATCH_DAYS = 30                # under 30 days           = Watch   (High risk + Watch = "SKUs at shortfall risk")
+MONITOR_DAYS = 60              # under 60 days           = Monitor (the mockup's at-risk list stops here)
+EXCESS_COVER_DAYS = 120        # 120 days or more        = Possible overstock; in between = Healthy
 REVIEW_DAYS = 14               # reorder covers lead time + safety stock + a 2-week review cycle
 NO_DEMAND_COVER = 999          # days of cover reported when there is no forecast demand
-RISK_ORDER = {"RED": 0, "AMBER": 1, "GREEN": 2, "BLUE": 3}
+FVA_DAYS = 14                  # forecast-vs-actual window (mockup: "last 14 days of the period")
+FVA_WEEKS = 4                  # forecast for a day = average of the same weekday in the 4 weeks before it
+FVA_OK, FVA_WARN = 10, 20      # variance bands: within +/-10% on track, 10-20% watch, over 20% off
+RISK_ORDER = {"High risk": 0, "Watch": 1, "Monitor": 2, "Healthy": 3, "Possible overstock": 4}
+AT_RISK = ("High risk", "Watch", "Monitor")   # states that get a suggested reorder qty
 
 
 def load_inputs():
@@ -52,6 +61,32 @@ def order_volume(fc, demand, asof):
               .rename(columns={"forecast_p50": "units_p50", "forecast_p90": "units_p90"}))
 
 
+# ============ forecast vs actual (mockup KPI "Forecast vs actual") ============
+def fva_status(variance_pct):
+    v = abs(variance_pct)
+    return "On track" if v <= FVA_OK else "Watch" if v <= FVA_WARN else "Off track"
+
+
+def forecast_vs_actual(demand, asof):
+    """Orders received per day vs forecast = mean of the same weekday over the 4 weeks before it.
+    Variance % = (received - forecast) / forecast; status On track <=10%, Watch <=20%, Off track >20%."""
+    daily = demand.groupby(["client_id", "warehouse", "date"]).orders.sum().rename("orders_received")
+    idx = pd.MultiIndex.from_product([daily.index.levels[0], daily.index.levels[1],
+                                      pd.date_range(daily.index.levels[2].min(), asof)],
+                                     names=["client_id", "warehouse", "date"])
+    daily = daily.reindex(idx, fill_value=0).reset_index()
+    daily = daily[daily.groupby(["client_id", "warehouse"]).orders_received.transform("sum") > 0]
+    daily = daily.sort_values(["client_id", "warehouse", "date"])
+    g = daily.groupby(["client_id", "warehouse"]).orders_received
+    daily["orders_forecast"] = sum(g.shift(7 * k) for k in range(1, FVA_WEEKS + 1)) / FVA_WEEKS
+    out = daily[daily.date > asof - pd.Timedelta(days=FVA_DAYS)].copy()
+    out = out[out.orders_forecast > 0]
+    out["variance_pct"] = ((out.orders_received - out.orders_forecast) / out.orders_forecast * 100).round(1)
+    out["status"] = out.variance_pct.map(fva_status)
+    out["orders_forecast"] = out.orders_forecast.round(1)
+    return out.reset_index(drop=True)
+
+
 # ============ inventory shortfall early warning (daily projection) ============
 def first_stockout(available, inbound, daily_demand, days):
     """First day the projected balance goes below zero, or NaT if it never does."""
@@ -60,21 +95,22 @@ def first_stockout(available, inbound, daily_demand, days):
     return days[below_zero[0]] if len(below_zero) else pd.NaT
 
 
-def classify(item, stockout_p50, stockout_p90, cover, next_asn, need_by):
-    """Return (risk_state, reason). Checked in order: RED, AMBER, BLUE, GREEN."""
-    if pd.notna(stockout_p50) and stockout_p50 <= need_by:
-        if pd.notna(next_asn) and next_asn > stockout_p50:
-            gap = (next_asn - stockout_p50).days
-            return "RED", (f"Runs out {stockout_p50.date()}, {gap} days before ASN arrives "
-                           f"{next_asn.date()} - expedite inbound")
-        return "RED", f"Runs out {stockout_p50.date()}, before a new order placed today could arrive"
-    if (pd.notna(stockout_p50)
-            or cover < item.supplier_lead_time_days + item.safety_stock_days
-            or (pd.notna(stockout_p90) and stockout_p90 <= need_by)):
-        return "AMBER", "Cover below lead time + safety stock (or short in a busy-week scenario) - reorder now"
-    if cover > EXCESS_COVER_DAYS:
-        return "BLUE", f"Excess stock (>{EXCESS_COVER_DAYS} days cover)"
-    return "GREEN", "Covered through lead time"
+def classify(cover, stockout_p50, next_asn):
+    """Return (risk_level, reason). Level is set by days of cover alone, as in the mockup;
+    the reason adds the projected stockout date and whether an inbound ASN arrives in time."""
+    if cover >= EXCESS_COVER_DAYS:
+        return "Possible overstock", f"{EXCESS_COVER_DAYS}+ days of stock"
+    if cover >= MONITOR_DAYS:
+        return "Healthy", "60-120 days of stock"
+    level = "High risk" if cover < HIGH_RISK_DAYS else "Watch" if cover < WATCH_DAYS else "Monitor"
+    if pd.isna(stockout_p50):
+        return level, f"{cover:.0f} days of stock; covered by forecast and inbound ASNs"
+    if pd.isna(next_asn):
+        return level, f"Runs out {stockout_p50.date()}; no inbound ASN"
+    if next_asn > stockout_p50:
+        return level, (f"Runs out {stockout_p50.date()}, {(next_asn - stockout_p50).days} days before "
+                       f"ASN arrives {next_asn.date()}")
+    return level, f"Runs out {stockout_p50.date()}; ASN arrives {next_asn.date()}"
 
 
 def assess_item(item, snapshot, sku_fc, sku_asn, asof, method_version):
@@ -95,9 +131,12 @@ def assess_item(item, snapshot, sku_fc, sku_asn, asof, method_version):
     usage = demand_p50[:USAGE_DAYS].mean()
     cover = available / usage if usage > 0 else NO_DEMAND_COVER
     lead_time = item.supplier_lead_time_days
-    next_asn = sku_asn.expected_arrival_date.min() if len(sku_asn) else pd.NaT
-    need_by = asof + pd.Timedelta(days=lead_time + item.lead_time_std_days)   # earliest a new PO could land
-    state, reason = classify(item, stockout_p50, stockout_p90, cover, next_asn, need_by)
+    open_asn = sku_asn[sku_asn.status != "Received"].sort_values("expected_arrival_date")
+    next_asn = open_asn.expected_arrival_date.iloc[0] if len(open_asn) else pd.NaT
+    asn_id = open_asn.asn_id.iloc[0] if len(open_asn) else None
+    # arrives in time = no projected stockout, or the ASN lands on or before the stockout date
+    asn_in_time = bool(pd.notna(next_asn) and (pd.isna(stockout_p50) or next_asn <= stockout_p50))
+    state, reason = classify(cover, stockout_p50, next_asn)
 
     target_days = lead_time + item.safety_stock_days + REVIEW_DAYS
     reorder = max(0, int(np.ceil(demand_p90[:target_days].sum() - available - inbound[:target_days].sum())))
@@ -106,10 +145,10 @@ def assess_item(item, snapshot, sku_fc, sku_asn, asof, method_version):
     return dict(sku=item.sku, client_id=item.client_id, warehouse=item.warehouse,
                 available_qty=int(available), avg_daily_usage_next4w=round(usage, 1),
                 days_of_cover=round(cover, 1), lead_time_days=lead_time,
-                next_asn_date=as_date(next_asn),
+                covered_by_asn=asn_id, next_asn_date=as_date(next_asn), asn_arrives_in_time=asn_in_time,
                 projected_stockout_p50=as_date(stockout_p50), projected_stockout_p90=as_date(stockout_p90),
                 risk_state=state, reason=reason,
-                suggested_reorder_qty=reorder if state in ("RED", "AMBER") else 0,
+                suggested_reorder_qty=reorder if state in AT_RISK else 0,
                 created_at=asof.date(), method_version=method_version)
 
 
@@ -141,7 +180,14 @@ def main():
     risk.to_csv(f"{OUT_DIR}/inventory_risk.csv", index=False)
 
     summary = dict(as_of=str(asof.date()), method_version=method_version, forecast_file=FORECAST_FILE,
-                   risk_counts=risk.risk_state.value_counts().to_dict())
+                   risk_counts=risk.risk_state.value_counts().reindex(list(RISK_ORDER), fill_value=0).to_dict())
+    fva = forecast_vs_actual(demand, asof)
+    fva.to_csv(f"{OUT_DIR}/forecast_vs_actual.csv", index=False)
+    rec, fcst = fva.orders_received.sum(), fva.orders_forecast.sum()
+    var = round((rec - fcst) / fcst * 100, 1)
+    summary["forecast_vs_actual"] = dict(window_days=FVA_DAYS, orders_received=int(rec),
+                                         orders_forecast=round(float(fcst)), variance_pct=var, status=fva_status(var))
+    summary["shortfall_risk_skus"] = summary["risk_counts"]["High risk"] + summary["risk_counts"]["Watch"]
     with open(f"{OUT_DIR}/risk_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
     print(json.dumps(summary, indent=2))
