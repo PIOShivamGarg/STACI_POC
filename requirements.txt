@@ -15,3 +15,7 @@ chronos-forecasting==2.3.2 # also installs torch (~1-2 GB); downloads amazon/chr
 # config and Excel output
 python-dotenv==1.2.4
 openpyxl==3.1.5
+
+# API for the React UI (api/main.py)
+fastapi==0.156.7
+uvicorn==0.54.0
