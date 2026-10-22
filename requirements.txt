@@ -20,5 +20,5 @@ openpyxl==3.1.5
 fastapi==0.156.7
 uvicorn==0.54.0
 
-# plain-English explanations (explain.py); needs OPENAI_API_KEY in .env
+# English explanations (explain.py); needs AZURE_OPENAI_API_KEY in .env
 openai==3.36.1

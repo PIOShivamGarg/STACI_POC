@@ -30,8 +30,9 @@ MODEL_FILE = f"{ML_DIR}/model.joblib"
 HIGH_P, WATCH_P, MONITOR_P = 0.50, 0.25, 0.10
 RULE_COVER_DAYS = 30      # baseline rule: flag SKUs with under 30 days of stock
 
-# time-based split (never shuffle): train on the past, calibrate on a peak season, test on the most recent months
-TRAIN_END, VAL_END = pd.Timestamp("2025-07-01"), pd.Timestamp("2026-01-01")
+# time-based split (never shuffle), relative to the as-of date: train on the past, calibrate on the
+# next 6 months, test on the most recent months
+TRAIN_MONTHS_BACK, VAL_MONTHS_BACK = 15, 9
 
 CATS = ["warehouse", "category", "channel", "client_id"]
 NUMERIC = ["available_qty", "avg_daily_7", "avg_daily_28", "avg_daily_91", "cover_days", "trend_28_91", "cv_28",
@@ -43,7 +44,7 @@ FEATURES = NUMERIC + CATS
 PARAMS = dict(n_estimators=300, learning_rate=0.04, num_leaves=15, min_child_samples=40, subsample=0.8,
               subsample_freq=1, colsample_bytree=0.8, reg_lambda=2.0, random_state=42, verbose=-1)
 
-# plain-English text for the top drivers (value-aware)
+# English text for the top drivers (value-aware)
 DRIVER_TEXT = {
     "cover_days": lambda v: f"only {v:.0f} days of stock at recent sales",
     "coverage_ratio_30d": lambda v: f"stock plus inbound covers only {v:.0%} of the next 30 days' demand",
@@ -172,6 +173,8 @@ def train():
     if not os.path.exists(path):
         raise SystemExit(f"{path} not found - run stock_sim.py first (or supply real stock history in that format)")
     asof = inv.snapshot_date.max()
+    TRAIN_END = (asof - pd.DateOffset(months=TRAIN_MONTHS_BACK)).normalize()
+    VAL_END = (asof - pd.DateOffset(months=VAL_MONTHS_BACK)).normalize()
     df = training_table(items, demand, events, pd.read_csv(path, parse_dates=["week_start"]), asof)
     tr, va, te = (df[df.week_start < TRAIN_END], df[(df.week_start >= TRAIN_END) & (df.week_start < VAL_END)],
                   df[df.week_start >= VAL_END])
@@ -184,7 +187,7 @@ def train():
                    rows=dict(train=len(tr), validation=len(va), test=len(te)),
                    split=dict(train_before=str(TRAIN_END.date()), validation_before=str(VAL_END.date())),
                    thresholds=dict(high=HIGH_P, watch=WATCH_P, monitor=MONITOR_P),
-                   validation_peak_season=evaluate(va.stockout_next_30d, predict(va), va.cover_days),
+                   validation=evaluate(va.stockout_next_30d, predict(va), va.cover_days),
                    test_recent=evaluate(te.stockout_next_30d, predict(te), te.cover_days))
     os.makedirs(ML_DIR, exist_ok=True)
     joblib.dump(dict(model=clf, calibrator=iso), MODEL_FILE)
@@ -202,7 +205,7 @@ def level_from_probability(p):
 
 
 def explain_row(values, contrib, k=3):
-    """Top-k features pushing risk up, as plain text. contrib are LightGBM per-feature contributions (log-odds)."""
+    """Top-k features pushing risk up, as text. contrib are LightGBM per-feature contributions (log-odds)."""
     order = np.argsort(-contrib)
     out = []
     for i in order:

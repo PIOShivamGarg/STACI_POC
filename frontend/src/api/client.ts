@@ -63,7 +63,7 @@ export interface MlResponse {
   method: "ml" | "rules";
   metrics: {
     horizon_days: number;
-    validation_peak_season: MlSplit;
+    validation: MlSplit;
     test_recent: MlSplit;
   } | null;
   insight: { text: string; source: string } | null;

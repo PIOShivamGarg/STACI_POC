@@ -5,7 +5,8 @@ import numpy as np, pandas as pd
 os.makedirs("data", exist_ok=True)
 rng = np.random.default_rng(42)
 
-START, ASOF = pd.Timestamp("2023-10-01"), pd.Timestamp("2026-10-12")
+ASOF = pd.Timestamp.today().normalize()                 # "today": the snapshot date; everything is relative to it
+START = (ASOF - pd.DateOffset(years=3)).normalize()     # 3 years of history
 dates = pd.date_range(START, ASOF, freq="D")
 
 clients = {"CL01": "Northwind Apparel", "CL02": "Contoso Health", "CL03": "Fabrikam Home"}
@@ -41,7 +42,7 @@ items = pd.DataFrame(items)
 
 # ---------- events (promos / peaks) ----------
 events = []
-for y in [2023, 2024, 2025, 2026]:
+for y in range(START.year, ASOF.year + 2):   # include next year so upcoming events are known
     bf = pd.Timestamp(f"{y}-11-01") + pd.offsets.Week(weekday=3) * 4 + pd.Timedelta(days=1)  # Black Friday
     events += [dict(event_id=f"BF{y}", client_id="ALL", name="Black Friday / Cyber Week",
                     start_date=bf, end_date=bf + pd.Timedelta(days=4), uplift=1.8),

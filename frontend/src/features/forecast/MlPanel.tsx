@@ -7,7 +7,7 @@ export default function MlPanel({ ml }: { ml: MlResponse }) {
   const m = ml.metrics;
   const rows = m && [
     { label: "Recent months (test)", s: m.test_recent },
-    { label: "Peak season (validation)", s: m.validation_peak_season },
+    { label: "Earlier period (validation)", s: m.validation },
   ];
   return (
     <div className="grid g2">
