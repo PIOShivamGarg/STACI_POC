@@ -1,8 +1,9 @@
-import { useFva, useRisk, useSummary, useVolume } from "../../api/client";
+import { useFva, useMl, useRisk, useSummary, useVolume } from "../../api/client";
 import { useFilters } from "../../components/FilterContext";
 import { Card, ErrorBox, Loading, Pill, StatTile } from "../../components/ui";
 import { fmtDate, num, signed } from "../../lib/format";
-import { FVA_PILL } from "../../lib/risk";
+import { FVA_PILL, riskCopy } from "../../lib/risk";
+import MlPanel from "./MlPanel";
 import FilterBar from "./FilterBar";
 import ShortfallTable from "./ShortfallTable";
 import VolumeChart from "./VolumeChart";
@@ -16,6 +17,8 @@ export default function ForecastPage() {
   const risk = useRisk(filters);
   const fva = useFva(filters);
   const summary = useSummary(filters);
+  const ml = useMl(filters);
+  const copy = riskCopy(ml.data?.method);
   const peak = volume.data ? peakInfo(volume.data) : null;
   const asOf = summary.data ? ` As of ${fmtDate(summary.data.as_of)}.` : "";
 
@@ -31,8 +34,8 @@ export default function ForecastPage() {
 
       <div className="grid g4">
         <StatTile label="SKUs at shortfall risk" value={risk.data?.shortfall_risk_skus ?? "—"}
-          sub="Under 30 days of stock" tone={risk.data?.shortfall_risk_skus ? "crit" : undefined} />
-        <StatTile label="High risk" value={risk.data?.counts["High risk"] ?? "—"} sub="Under 14 days of stock" />
+          sub={copy.shortfall} tone={risk.data?.shortfall_risk_skus ? "crit" : undefined} />
+        <StatTile label="High risk" value={risk.data?.counts["High risk"] ?? "—"} sub={copy.high} />
         <StatTile label="Forecast peak" value={peak ? num(peak.orders) : "—"}
           sub={peak ? `Week of ${fmtDate(peak.week)} · ${peak.pctVsLatest >= 0 ? "+" : ""}${peak.pctVsLatest}% vs latest week` : ""} />
         <StatTile label="Forecast vs actual" value={fva.data ? signed(fva.data.variance_pct) : "—"}
@@ -52,11 +55,13 @@ export default function ForecastPage() {
       </Card>
 
       <Card title="Items at risk of running short"
-        sub="Days of stock from available quantity and expected demand, checked against inbound ASNs">
+        sub={ml.data?.method === "ml" ? "Chance of running out in the next 30 days, from the ML model" : "Days of stock from available quantity and expected demand, checked against inbound ASNs"}>
         {risk.isLoading ? <Loading rows={5} /> : risk.error ? <ErrorBox error={risk.error} /> : risk.data && (
           <ShortfallTable rows={risk.data.rows} counts={risk.data.counts} />
         )}
       </Card>
+
+      {ml.data?.method === "ml" && <MlPanel ml={ml.data} />}
     </>
   );
 }

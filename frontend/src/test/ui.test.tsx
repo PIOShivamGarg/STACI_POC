@@ -70,3 +70,17 @@ describe("ShortfallTable", () => {
     expect(screen.queryByRole("button", { name: "Create ASN" })).not.toBeInTheDocument();
   });
 });
+
+describe("ML risk details", () => {
+  const r = row({ risk_probability: 0.91, top_drivers: "only 8 days of stock; next shipment due in 25 days",
+                  explanation: "Likely to run out soon.", rule_risk_state: "Watch" });
+  it("shows the probability and reveals the explanation on Why?", () => {
+    render(<ShortfallTable rows={[r]} counts={counts} />);
+    expect(screen.getByText("91% chance")).toBeInTheDocument();
+    expect(screen.queryByText("Likely to run out soon.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Why?" }));
+    expect(screen.getByText("Likely to run out soon.")).toBeInTheDocument();
+    expect(screen.getByText("only 8 days of stock")).toBeInTheDocument();
+    expect(screen.getByText(/old days-of-stock rule said Watch/)).toBeInTheDocument();
+  });
+});

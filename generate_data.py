@@ -1,6 +1,8 @@
 """Synthetic dataset for the Staci 8.2 POC: order-volume forecast + inventory-shortfall early warning.
 All data is fictional. Swap these CSVs for real Staci extracts with the same columns."""
+import os
 import numpy as np, pandas as pd
+os.makedirs("data", exist_ok=True)
 rng = np.random.default_rng(42)
 
 START, ASOF = pd.Timestamp("2023-10-01"), pd.Timestamp("2026-10-12")

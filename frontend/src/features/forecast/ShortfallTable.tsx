@@ -16,10 +16,29 @@ export function runsOut(r: RiskRow): string {
   return r.projected_stockout_p50 ? `Runs out around ${fmtDate(r.projected_stockout_p50)}` : "No stockout in the next 13 weeks";
 }
 
+function Why({ r }: { r: RiskRow }) {
+  const drivers = r.top_drivers?.split("; ").filter(Boolean) ?? [];
+  return (
+    <div className="why">
+      <p style={{ margin: 0 }}>{r.explanation ?? r.reason}</p>
+      {drivers.length > 0 && (
+        <ul>{drivers.map((d) => <li key={d}>{d}</li>)}</ul>
+      )}
+      <p className="tiny muted" style={{ margin: "6px 0 0" }}>
+        {r.explanation_source && r.explanation_source !== "template" ? `Explanation written by ${r.explanation_source} from the model facts. ` : ""}
+        {r.rule_risk_state && r.rule_risk_state !== r.risk_state ? `The old days-of-stock rule said ${r.rule_risk_state}.` : ""}
+      </p>
+    </div>
+  );
+}
+
 function Row({ r }: { r: RiskRow }) {
+  const [open, setOpen] = useState(false);
   const asn = asnStatus(r);
   const cover = r.days_of_cover < 1 ? "<1 day" : `${Math.round(r.days_of_cover)} days`;
+  const hasProb = r.risk_probability != null;
   return (
+    <div className="lrow-wrap">
     <div className="lrow">
       <span className="thumb" aria-hidden="true">{r.category.slice(0, 2).toUpperCase()}</span>
       <span>
@@ -29,12 +48,18 @@ function Row({ r }: { r: RiskRow }) {
       <span><b>{cover}</b><span className="s block">{runsOut(r)}</span></span>
       <span className="s" style={{ color: `var(--${asn.tone}-text)` }}>{asn.text}</span>
       <span className="actions">
-        <Pill tone={LEVEL_PILL[r.risk_state]}>{r.risk_state}</Pill>
+        <span className="pillcol">
+          <Pill tone={LEVEL_PILL[r.risk_state]}>{r.risk_state}</Pill>
+          {hasProb && <span className="tiny muted">{Math.round(r.risk_probability! * 100)}% chance</span>}
+        </span>
+        <button className="btn sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? "Hide" : "Why?"}</button>
         <button className="btn sm" disabled title="Item pages are not part of this prototype">Open item</button>
         {!r.covered_by_asn && (
           <button className="btn sm dark" disabled title={`Suggested order: ${num(r.suggested_reorder_qty)} units`}>Create ASN</button>
         )}
       </span>
+    </div>
+    {open && <Why r={r} />}
     </div>
   );
 }

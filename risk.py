@@ -15,7 +15,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from config import DATA_DIR, OUT_DIR
+from config import DATA_DIR, OUT_DIR, RISK_METHOD
 
 FORECAST_FILE = f"{OUT_DIR}/sku_forecast.csv"
 
@@ -148,8 +148,7 @@ def assess_item(item, snapshot, sku_fc, sku_asn, asof, method_version):
                 covered_by_asn=asn_id, next_asn_date=as_date(next_asn), asn_arrives_in_time=asn_in_time,
                 projected_stockout_p50=as_date(stockout_p50), projected_stockout_p90=as_date(stockout_p90),
                 risk_state=state, reason=reason,
-                suggested_reorder_qty=reorder if state in AT_RISK else 0,
-                created_at=asof.date(), method_version=method_version)
+                _reorder=reorder, created_at=asof.date(), method_version=method_version)
 
 
 def inventory_risk(items, inventory, asn, fc, asof, method_version):
@@ -159,10 +158,35 @@ def inventory_risk(items, inventory, asn, fc, asof, method_version):
                         asn[asn.sku == item.sku],
                         asof, method_version)
             for item in items.itertuples(index=False)]
-    # most urgent first: by risk state, then lowest cover
-    return pd.DataFrame(rows).sort_values(
-        ["risk_state", "days_of_cover"],
-        key=lambda col: col.map(RISK_ORDER) if col.name == "risk_state" else col)
+    df = pd.DataFrame(rows)
+    df["risk_method"] = "rules"
+    if RISK_METHOD == "ml":
+        df = apply_ml(df, asof)
+    df["suggested_reorder_qty"] = np.where(df.risk_state.isin(AT_RISK), df._reorder, 0)
+    df = df.drop(columns="_reorder")
+    # most urgent first: by risk state, then highest chance of running out (ML) or lowest cover (rules)
+    by = ["risk_state", "risk_probability" if "risk_probability" in df else "days_of_cover"]
+    return df.sort_values(by, ascending=[True, "risk_probability" not in df],
+                          key=lambda col: col.map(RISK_ORDER) if col.name == "risk_state" else col)
+
+
+def apply_ml(df, asof):
+    """Set the risk level from the ML stockout probability (ml_risk.py). Overstock stays rule-based (the model
+    predicts shortages only). The old rule level is kept in rule_risk_state for comparison."""
+    from ml_risk import MODEL_FILE, level_from_probability, score
+    if not os.path.exists(MODEL_FILE):
+        print(f"WARNING: {MODEL_FILE} not found - using rule-based risk levels. Run stock_sim.py and ml_risk.py.")
+        return df
+    ml = score(asof)[["sku", "risk_probability", "top_drivers"]]
+    df = df.merge(ml, on="sku")
+    df["rule_risk_state"] = df.risk_state
+    ml_level = df.risk_probability.map(level_from_probability)
+    df["risk_state"] = np.where(df.rule_risk_state == "Possible overstock", "Possible overstock", ml_level)
+    shortage = df.risk_state != "Possible overstock"
+    df.loc[shortage, "reason"] = (df.risk_probability[shortage].map(lambda p: f"{p:.0%} chance of running out within 30 days. ")
+                                  + df.reason[shortage])
+    df["risk_method"] = "ml"
+    return df
 
 
 def main():
@@ -180,6 +204,7 @@ def main():
     risk.to_csv(f"{OUT_DIR}/inventory_risk.csv", index=False)
 
     summary = dict(as_of=str(asof.date()), method_version=method_version, forecast_file=FORECAST_FILE,
+                   risk_method=risk.risk_method.iloc[0],
                    risk_counts=risk.risk_state.value_counts().reindex(list(RISK_ORDER), fill_value=0).to_dict())
     fva = forecast_vs_actual(demand, asof)
     fva.to_csv(f"{OUT_DIR}/forecast_vs_actual.csv", index=False)

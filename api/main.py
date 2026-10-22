@@ -48,6 +48,23 @@ def records(df: pd.DataFrame) -> list[dict]:
     return json.loads(df.to_json(orient="records", date_format="iso"))
 
 
+def explanations() -> dict:
+    path = f"{OUTPUT_ROOT}/ml_risk/explanations.json"
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+@app.get("/api/ml")
+def ml(model: str = "lgbm"):
+    """How the ML risk model performed against the rule, plus the portfolio-level explanation."""
+    path = f"{OUTPUT_ROOT}/ml_risk/metrics.json"
+    metrics = json.load(open(path)) if os.path.exists(path) else None
+    return dict(method=summary(model).get("risk_method", "rules"), metrics=metrics,
+                insight=explanations().get("portfolio"))
+
+
 @app.get("/api/models")
 def models():
     return [m for m in MODELS if os.path.exists(f"{OUTPUT_ROOT}/{m}/inventory_risk.csv")]
@@ -108,8 +125,13 @@ def risk(model: str = "lgbm", warehouse: str | None = None, client: str | None =
     if level:
         df = df[df.risk_state == level]
     order = {s: i for i, s in enumerate(RISK_LEVELS)}
-    df = df.sort_values(["risk_state", "days_of_cover"],
+    by_prob = "risk_probability" in df
+    df = df.sort_values(["risk_state", "risk_probability" if by_prob else "days_of_cover"],
+                        ascending=[True, not by_prob],
                         key=lambda c: c.map(order) if c.name == "risk_state" else c)
+    notes = explanations().get("skus", {})
+    df["explanation"] = df.sku.map(lambda s: notes.get(s, {}).get("text"))
+    df["explanation_source"] = df.sku.map(lambda s: notes.get(s, {}).get("source"))
     df = df.astype(object).where(df.notna(), None)
     return dict(counts=counts, shortfall_risk_skus=counts["High risk"] + counts["Watch"], rows=records(df))
 

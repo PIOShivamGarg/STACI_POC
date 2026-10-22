@@ -30,6 +30,12 @@ export interface RiskRow {
   risk_state: RiskLevel;
   reason: string;
   suggested_reorder_qty: number;
+  // set when the ML risk model is on (RISK_METHOD=ml)
+  risk_probability?: number | null;
+  top_drivers?: string | null;
+  rule_risk_state?: RiskLevel | null;
+  explanation?: string | null;
+  explanation_source?: string | null;
 }
 
 export interface RiskResponse {
@@ -44,6 +50,23 @@ export interface FvaResponse {
   variance_pct: number;
   status: FvaStatus;
   days: { date: string; orders_received: number; orders_forecast: number }[];
+}
+
+interface MlSplit {
+  rows: number;
+  stockout_rate: number;
+  ml: { pr_auc: number; roc_auc: number; at_same_flag_count: { precision: number; recall: number } };
+  rule: { pr_auc: number; roc_auc: number; at_30_days: { precision: number; recall: number } };
+}
+
+export interface MlResponse {
+  method: "ml" | "rules";
+  metrics: {
+    horizon_days: number;
+    validation_peak_season: MlSplit;
+    test_recent: MlSplit;
+  } | null;
+  insight: { text: string; source: string } | null;
 }
 
 export interface SummaryResponse {
@@ -71,6 +94,8 @@ export const useWarehouses = (f: Filters) =>
   });
 export const useSummary = (f: Filters) =>
   useQuery({ queryKey: ["summary", f.model], queryFn: () => get<SummaryResponse>("summary", { model: f.model }) });
+export const useMl = (f: Filters) =>
+  useQuery({ queryKey: ["ml", f.model], queryFn: () => get<MlResponse>("ml", { model: f.model }) });
 export const useVolume = (f: Filters) =>
   useQuery({ queryKey: ["volume", f], queryFn: () => get<VolumeResponse>("volume", scope(f)) });
 export const useRisk = (f: Filters) =>
