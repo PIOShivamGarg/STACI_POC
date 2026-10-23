@@ -9,7 +9,7 @@ load_dotenv()
 
 # FORECAST_MODEL value -> module in models/ that trains it
 MODELS = {"lgbm": "models.lgbm", "xgboost": "models.xgb", "chronos": "models.chronos",
-          "stats": "models.stats"}
+          "stats": "models.stats", "ensemble": "models.ensemble"}
 
 DATA_DIR = "data"
 OUTPUT_ROOT = "outputs"

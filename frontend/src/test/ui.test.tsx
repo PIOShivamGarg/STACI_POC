@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { RiskRow } from "../api/client";
-import ShortfallTable, { asnStatus, runsOut } from "../features/forecast/ShortfallTable";
+import ShortfallTable, { asnStatus, chanceText, runsOut } from "../features/forecast/ShortfallTable";
 import { buildSeries, peakInfo } from "../features/forecast/volumeData";
 import { fmtDate, signed } from "../lib/format";
 
@@ -42,8 +42,16 @@ describe("ASN status", () => {
     const s = asnStatus(row({ covered_by_asn: "ASN1", next_asn_date: "2026-10-20", asn_arrives_in_time: true }));
     expect(s).toEqual({ text: "Covered by ASN1 (ETA Oct 20)", tone: "ok" });
   });
+  it("shows the likely date when the supplier usually runs late", () => {
+    const s = asnStatus(row({ covered_by_asn: "ASN1", next_asn_date: "2026-10-20", next_asn_likely_date: "2026-10-25" }));
+    expect(s).toEqual({ text: "ASN1 (ETA Oct 20, likely Oct 25) — after stockout", tone: "warn" });
+  });
   it("warns when the ASN is too late", () =>
     expect(asnStatus(row({ covered_by_asn: "ASN1", next_asn_date: "2026-10-29" })).tone).toBe("warn"));
+  it("shows the overstock chance on overstock rows", () => {
+    expect(chanceText(row({ risk_state: "Possible overstock", risk_probability: 0.01, overstock_probability: 0.74 }))).toBe("74% chance");
+    expect(chanceText(row({ risk_probability: 0.88, overstock_probability: 0.01 }))).toBe("88% chance");
+  });
   it("handles no projected stockout", () => expect(runsOut(row({ projected_stockout_p50: null }))).toMatch(/No stockout/));
 });
 

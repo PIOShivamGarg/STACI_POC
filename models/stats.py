@@ -16,7 +16,7 @@ from statsforecast import StatsForecast
 from statsforecast.models import MSTL, TSB, AutoETS
 from statsforecast.utils import ConformalIntervals
 
-METHOD_VERSION = "stats-mstl-ets-tsb-v0.1"
+METHOD_VERSION = "stats-mstl-ets-tsb-v0.2"
 SEASON = 52                    # weeks in a year
 SLOW_ZERO_SHARE = 0.3          # more than 30% zero weeks in the last year -> slow mover (TSB)
 TSB_ALPHA = 0.2                # TSB smoothing for "how often" and "how much"

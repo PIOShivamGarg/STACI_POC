@@ -11,7 +11,8 @@ import pandas as pd
 
 from config import MODELS, OUTPUT_ROOT
 
-WINDOWS = {"last_13_weeks": "Last 13 weeks", "peak_season_last_year": "Last peak season"}
+WINDOWS = {"last_13_weeks": "Last 13 weeks", "peak_season_last_year": "Last peak season",
+           "all_windows": "Average of 8 windows"}
 DELIVERABLES = {   # summary.json section -> (deliverable, what is compared)
     "order_volume": ("1. Order Volume", "orders per client / warehouse / channel / week"),
     "shortfall_risk": ("2. Shortfall Risk", "demand during each SKU's lead time (proxy)"),
@@ -33,7 +34,7 @@ def main():
     runs = {m: s for m, s in runs.items() if s}
     if not runs:
         raise SystemExit(f"No results found under {OUTPUT_ROOT}/ - run forecast.py first")
-    any_run = next(iter(runs.values()))
+    any_run = max(runs.values(), key=lambda s: len(s["backtest"]))   # a run with every window, for the benchmarks
 
     rows = []
     for section, (deliverable, compared) in DELIVERABLES.items():
@@ -41,9 +42,11 @@ def main():
             for window, window_name in WINDOWS.items():
                 row = {"deliverable": deliverable, "compared": compared, "measure": measure,
                        "window": window_name, "better_is": better}
-                row.update({m: s["backtest"][window][section][key] for m, s in runs.items()})
-                # naive benchmark is the same for every model; it has no P90
-                row["naive"] = any_run["backtest"][window][section]["naive"] if key == "model" else None
+                row.update({m: s["backtest"].get(window, {}).get(section, {}).get(key) for m, s in runs.items()})
+                # benchmarks are the same for every model; they have no P90
+                bench = any_run["backtest"].get(window, {}).get(section, {})
+                row["naive"] = bench.get("naive") if key == "model" else None
+                row["same_week_last_year"] = bench.get("seasonal_naive") if key == "model" else None
                 rows.append(row)
 
     for state in RISK_STATES:   # live alerts raised today - a count, not an accuracy score
@@ -59,7 +62,7 @@ def main():
 
     shown = table.drop(columns=["compared"]).copy()
     pct = shown.measure.isin([m for m, _ in MEASURES.values()])
-    for col in list(runs) + ["naive"]:
+    for col in list(runs) + ["naive", "same_week_last_year"]:
         shown[col] = [f"{v:.1%}" if p and pd.notna(v) else ("" if pd.isna(v) else int(v))
                       for v, p in zip(shown[col], pct)]
     print(shown.to_string(index=False))

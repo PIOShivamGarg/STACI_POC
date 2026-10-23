@@ -35,9 +35,9 @@ RISK_FILLS = {state: PatternFill("solid", fgColor=color)
 STYLE_ROW_LIMIT = 5000        # skip per-cell fonts on bigger sheets (daily_demand) - too slow
 WIDTH_SAMPLE_ROWS = 200       # rows sampled to size each column
 MODEL_NAME = {"lgbm": "LightGBM", "xgboost": "XGBoost", "chronos": "Chronos-2",
-              "stats": "Statistical (MSTL+ETS / TSB)"}.get(MODEL, MODEL)
+              "stats": "Statistical (MSTL+ETS / TSB)", "ensemble": "Ensemble"}.get(MODEL, MODEL)
 TREE_DESCRIPTION = ("global model trained on lag / rolling / event features: P50 (tweedie objective) "
-                    "and P90 (quantile 0.9), recursive 13-week forecast")
+                    "and P90 (quantile 0.9), each of the 13 weeks predicted directly, relative to the SKU's recent level")
 MODEL_DESCRIPTION = {
     "stats": ("one small statistical model per SKU (statsforecast, Apache 2.0): regular sellers use MSTL + ETS "
               "(yearly pattern + smoothed level/trend), slow movers (>30% zero weeks) use TSB; "
@@ -45,6 +45,7 @@ MODEL_DESCRIPTION = {
     "chronos": ("pre-trained time-series foundation model (Amazon, Apache 2.0), no training on Staci data: "
                 "forecasts the 0.5 and 0.9 quantiles directly from each SKU's weekly history, "
                 "with event uplift as a known future input"),
+    "ensemble": "plain average of the LightGBM, Chronos-2 and XGBoost forecasts (P50 and P90)",
 }.get(MODEL, TREE_DESCRIPTION)
 
 
@@ -56,9 +57,10 @@ def readme_sheet():
 
     def backtest_line(section):
         parts = []
-        for window, label in [("last_13_weeks", "last 13 weeks"), ("peak_season_last_year", "last peak season")]:
+        for window, label in [("last_13_weeks", "last 13 weeks"), ("peak_season_last_year", "last peak season"),
+                              ("all_windows", "average of 8 windows")]:
             b = summary["backtest"][window][section]
-            parts.append(f'{label}: WAPE {b["model"]:.1%} (naive {b["naive"]:.1%}), P90 coverage {b["p90_coverage"]:.1%}')
+            parts.append(f'{label}: WAPE {b["model"]:.1%} (naive {b["naive"]:.1%}, same week last year {b["seasonal_naive"]:.1%}), P90 coverage {b["p90_coverage"]:.1%}')
         return "; ".join(parts)
 
     rows = [
@@ -85,11 +87,13 @@ def readme_sheet():
                                          "- for labour and capacity planning"),
         ("OUTPUT sku_forecast", "Weekly SKU demand P50 / P90 for next 13 weeks, with created_at and "
                                 "method_version for audit"),
-        ("OUTPUT backtest_accuracy", f"Per-SKU forecast vs actual for two historical windows, {MODEL_NAME} vs naive"),
+        ("OUTPUT backtest_accuracy", f"Per-SKU forecast vs actual for 8 historical windows, {MODEL_NAME} vs naive"),
         ("OUTPUT feature_importance", f"Which inputs drive the {MODEL_NAME} P50 forecast (share of total gain); "
                                       "tree models only"),
-        ("Risk levels", "By days of cover (as in the portal mockup): High risk <14; Watch 14-30; Monitor 30-60; "
-                        "Healthy 60-120; Possible overstock 120+. Shortfall risk = High risk + Watch"),
+        ("Risk levels", "From the ML models (RISK_METHOD=ml): chance of running out within 30 days - High risk 50%+, "
+                        "Watch 25-50%, Monitor 10-25%, Healthy under 10%; Possible overstock = 50%+ chance stock + "
+                        "inbound is not used up within 120 days. Shortfall risk = High risk + Watch. "
+                        "rule_risk_state keeps the old days-of-cover levels for comparison"),
     ]
     return pd.DataFrame(rows, columns=["Item", "Detail"])
 

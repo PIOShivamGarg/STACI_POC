@@ -24,6 +24,8 @@ export interface RiskRow {
   lead_time_days: number;
   covered_by_asn: string | null;
   next_asn_date: string | null;
+  supplier_delay_days?: number;
+  next_asn_likely_date?: string | null;   // next_asn_date + the supplier's recent average delay
   asn_arrives_in_time: boolean;
   projected_stockout_p50: string | null;
   projected_stockout_p90: string | null;
@@ -32,6 +34,7 @@ export interface RiskRow {
   suggested_reorder_qty: number;
   // set when the ML risk model is on (RISK_METHOD=ml)
   risk_probability?: number | null;
+  overstock_probability?: number | null;   // chance stock + inbound is not used up within 120 days
   top_drivers?: string | null;
   rule_risk_state?: RiskLevel | null;
   explanation?: string | null;

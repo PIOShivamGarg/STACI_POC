@@ -9,7 +9,7 @@ There are two ML parts, and they answer different questions:
 
 | Part | Question | Model |
 |---|---|---|
-| **Demand forecast** (`forecast.py`) | How many units of each SKU will be ordered in the next 13 weeks? | LightGBM, XGBoost, Chronos-2 or a statistical baseline |
+| **Demand forecast** (`forecast.py`) | How many units of each SKU will be ordered in the next 13 weeks? | LightGBM, XGBoost, Chronos-2, a statistical baseline, or an average of several (ensemble) |
 | **Stockout risk** (`ml_risk.py`) | Will this SKU run out of stock in the next 30 days? | LightGBM classifier |
 
 The demand forecast has two figures per item and week:
@@ -73,7 +73,7 @@ npm test                         # UI unit tests
 
 | Variable | Meaning |
 |---|---|
-| `FORECAST_MODEL` | `lgbm`, `xgboost`, `chronos` or `stats` |
+| `FORECAST_MODEL` | `lgbm`, `xgboost`, `chronos`, `stats` or `ensemble` |
 | `RISK_METHOD` | `ml` (default): risk level from the ML probability. `rules`: old days-of-stock cutoffs. If the ML model file is missing, `risk.py` warns and falls back to `rules`. |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | Key and model for `explain.py`. Without a key, template sentences are used. |
 | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION` | For an Azure OpenAI deployment. Set the endpoint (`https://<resource>.openai.azure.com`) and put the **deployment name** in `OPENAI_MODEL`. Leave blank for api.openai.com. |
@@ -86,12 +86,15 @@ npm test                         # UI unit tests
 
 | `FORECAST_MODEL` | Model | How it works |
 |---|---|---|
-| `lgbm` | LightGBM | One model for all SKUs, trained on lag, rolling-average, seasonal and event features. P50 uses a Tweedie objective, P90 a 0.9 quantile objective. |
+| `lgbm` | LightGBM | One model for all SKUs. Predicts each of the 13 weeks directly (no feeding predictions back in), as a ratio of the SKU's recent weekly level, from lag, rolling-average, same-week-last-year, calendar and event features. P50 uses a Tweedie objective, P90 a 0.9 quantile objective. |
 | `xgboost` | XGBoost | Same features and settings as LightGBM, for comparison. |
 | `chronos` | Chronos-2 (Amazon) | Pre-trained time-series foundation model, used without training on our data. Forecasts the 0.5 / 0.9 quantiles from each SKU's history, with event uplift as an input. Downloads about 0.5 GB of weights on first run, then works offline on CPU. |
 | `stats` | MSTL + ETS / TSB | Classic statistical baseline, one model per SKU. Regular sellers use MSTL + AutoETS (yearly pattern plus smoothed level and trend); slow movers use TSB (intermittent demand). |
+| `ensemble` | Average | Plain average of the LightGBM, Chronos-2 and XGBoost forecasts (ML models only). Different models win in different periods, so the average is steadier. Takes as long as all three together. |
 
-All four are free and open source. Adding a model means one file in `models/` and one line in `config.py`.
+All are free and open source. Adding a model means one file in `models/` and one line in `config.py`.
+
+**P90 sizing (all models).** The backtest measures how far actual demand went above P50, in units of each model's own P90 − P50 gap, separately for weeks 1–4 / 5–8 / 9–13 ahead and for peak season (November to New Year). The live P90 is widened or narrowed so actual demand should stay under it about 90% of the time. The factors are in `summary.json` (`p90_factors`). The P90 coverage reported for each backtest window uses factors learned on the *other* windows only.
 
 ## How it works
 
@@ -110,27 +113,33 @@ generate_data.py ──► data/ ──┬─► stock_sim.py ─► stock_histo
 - **`forecast.py`**
   - Sums daily demand into weeks.
   - Forecasts 13 weeks ahead with the chosen model.
-  - **Backtests** on two past windows, the last 13 weeks and last year's peak season. For each window it pretends to be at an earlier date, forecasts, and compares the forecast with what actually happened.
+  - **Backtests** from 8 past start dates over the last ~14 months (including the last 13 weeks and last year's peak season). For each one it pretends to be at that date, forecasts, and compares the forecast with what actually happened, against two benchmarks: the last 4 weeks' average and the same week last year.
+  - Sizes the P90 from the backtest errors (see above).
+  - Appends the live forecast to `forecast_ledger.csv`, so it can be scored against actuals later.
 - **`risk.py`**
-  - **Order volume:** converts units to orders using each SKU's recent orders-per-unit ratio, then sums by client, warehouse, channel and week.
+  - **Order volume:** P50 converts the SKU unit forecast to orders using each SKU's recent orders-per-unit ratio, then sums by client, warehouse, channel and week. P90 comes from a second run of the same ML model, trained directly on weekly orders of the 12 client / warehouse / channel series (`order_forecast.csv`). Adding up SKU P90s would assume every SKU runs high at once: actual stayed under that about 98% of the time instead of 90%. The direct model's P50 was tested too, but was less accurate than the SKU-based P50 (13.9% against 13.0% WAPE for LightGBM; 12 series are little to learn from), so it is only reported (`direct_ml_p50` in `summary.json`).
   - **Per SKU:** days of cover (available ÷ average daily forecast demand over the next 4 weeks), projected stockout dates (stock day by day as `available − forecast demand + inbound ASNs`), ASN cover, and a suggested reorder quantity.
-  - **Risk level:** from the ML model's probability (see below). The old rule level is kept in `rule_risk_state` for comparison. **Possible overstock** stays rule-based (120 days of cover or more), since the model only predicts shortages.
-  - **Reorder quantity:** sized on P90 demand over lead time + safety stock + a 2-week review cycle, minus available stock and inbound; given for High risk, Watch and Monitor items.
-  - **Forecast vs actual:** for each of the last 14 days, orders received vs the average of the same weekday in the 4 weeks before. Variance within ±10% is On track, 10–20% Watch, over 20% Off track.
+  - **Daily projection:** weekly forecasts are spread over the days using each SKU's own weekday pattern (last 13 weeks). It starts the day after the as-of date: forecast week 1 begins on the Monday after the last full week, so any days of it that have already happened are skipped. ASNs are expected on their due date plus the supplier's recent average delay (`supplier_delay_days`, `next_asn_likely_date`).
+  - **Risk level:** from the ML models' probabilities (see below): the stockout model sets High risk / Watch / Monitor / Healthy, and the overstock model sets **Possible overstock** (for SKUs not at High risk or Watch). The old rule level is kept in `rule_risk_state` for comparison.
+  - **Reorder quantity:** sized on P90 demand over lead time + safety stock + a 2-week review cycle, minus available stock and inbound; given for High risk, Watch and Monitor items. The P90 over the whole period is P50 plus the weekly P90 − P50 gaps combined as independent (adding weekly P90s together would assume every week runs high at once), plus a buffer for lead-time variability.
+  - **Live forecast accuracy:** past forecasts in `forecast_ledger.csv` are scored against the weeks that have fully happened since (`forecast_accuracy_tracking.csv`, and `live_forecast_accuracy` in `risk_summary.json`). This is real-world accuracy, as opposed to the backtest. It stays empty until a forecast's first week has passed.
+  - **Forecast vs actual:** for each of the last 14 days, orders received vs what the ML model forecast for those days (`fva_forecast.csv`). That forecast is made by `forecast.py` from full weeks that ended *before* the 14 days started (`forecast_data_to`), built like the Order Volume P50 and split over the days with each client / warehouse's weekday pattern. Variance within ±10% is On track, 10–20% Watch, over 20% Off track. Without `fva_forecast.csv` it falls back to the average of the same weekday in the 4 weeks before.
 
-## ML stockout-risk model
+## ML stock-risk models (stockout and overstock)
 
 **Question:** will this SKU run out of stock in the next 30 days? The answer is a calibrated probability (for example 91%).
 
-**1. Training history (`stock_sim.py`).** Only one real stock snapshot exists, so the real daily sales are replayed against a planner who reviews stock weekly and orders from the trailing 28 days of demand, with suppliers that are sometimes late. This gives, for every SKU and every Monday: stock, inbound stock, supplier delays, recent stockouts, and the label (did it run out in the next 30 days). About 15–20% of SKU-weeks are positive. With real stock history, supply a `data/stock_history.csv` with the same columns and `ml_risk.py` trains on it unchanged.
+**1. Training history (`stock_sim.py`).** Only one real stock snapshot exists, so the real daily sales are replayed against a planner who orders from trailing demand, with suppliers that are sometimes late. The real planner's habits are unknown, so this is done under 5 planning policies (different demand windows, review cycles and order sizes, including one that over-buys, which gives the overstock model examples to learn from); a model trained on one policy just learns that policy. This gives, for every policy, SKU and day: stock, inbound stock, supplier delays, recent stockouts, and the label (did it run out in the next 30 days). About 16% of rows ran out within 30 days. With real stock history, supply a `data/stock_history.csv` with the same columns (`policy` = 0) and `ml_risk.py` trains on it unchanged.
 
-**2. Features (`ml_risk.py`).** All known on the as-of day: available stock, average daily sales over 7 / 28 / 91 days, days of cover, 28 vs 91 day trend, demand volatility, last year's change for the same period, event uplift over the next 30 days, inbound quantity and days to the next arrival, supplier delay over the last 3 deliveries, stockout days in the last 6 months, days since the last stockout, lead time, lead-time spread, safety stock, week of year, and warehouse / category / channel / client.
+**2. Features (`ml_risk.py`).** All known on the as-of day: available stock, average daily sales over 7 / 28 / 91 days, days of cover, 28 vs 91 day trend, demand volatility, last year's change for the same period, event uplift over the next 30 days, inbound quantity and days to the next arrival, supplier delay over the last 3 deliveries, stockout days in the last 6 months, days since the last stockout, lead time, lead-time spread, safety stock, week of year, and warehouse / category / channel / client. Plus features that combine them the way a planner would: expected daily sales (recent sales × last year's seasonal change), days of stock at expected sales, when the next shipment will *really* land (due date + the supplier's recent lateness), whether stock lasts until then (`stock_vs_arrival`, the model's strongest signal), and how far stock + inbound falls short of the next 30 days' expected demand.
 
 **3. Training.**
 - LightGBM classifier.
-- **Time-based split, never shuffled:** train on data older than 15 months, calibrate on the next 6 months, test on the most recent 9 months.
-- **Calibration** (isotonic regression) so that "70%" means about 70%.
-- **Compared with the old rule** (days of stock under 30). The model is only worth using if it beats the rule.
+- **Time-based split, never shuffled:** train on data older than 15 months, calibrate on the next 6 months, test on the most recent 9 months. Training stops 30 days before each split, because a row's label looks 30 days ahead. Scores are reported on the reference policy.
+- **Calibration** (Platt scaling) so that "70%" means about 70%. `metrics.json` (`by_level`) shows, for each risk level, the average predicted chance next to how often SKUs really ran out.
+- **The model used for scoring is refitted on all history** after the evaluation. Its calibration comes from out-of-time predictions (train before a cut-off, predict the 6 months after, for 4 cut-offs).
+- **Compared with the old rule** (days of stock under 30) and a simple projection (stock + inbound under 30 days of recent sales). The model is only worth using if it beats both.
+- Tried and left out: monotonic constraints and bigger trees (both slightly worse on the test period).
 
 **4. Risk levels from the probability:**
 
@@ -143,7 +152,9 @@ generate_data.py ──► data/ ──┬─► stock_sim.py ─► stock_histo
 
 **SKUs at shortfall risk** = High risk + Watch. Thresholds are constants at the top of `ml_risk.py`.
 
-**5. Reasons.** LightGBM's per-feature contributions give the top 3 factors pushing each SKU's risk up, written as plain text (`top_drivers`), for example "supplier's last deliveries ran 5.3 days late on average".
+**5. Reasons.** LightGBM's per-feature contributions give the top 3 factors pushing each SKU's risk up, written as plain text (`top_drivers`), for example "supplier's last deliveries ran 5.3 days late on average". For Possible overstock items they are the factors pushing the overstock risk up, for example "stock plus inbound is 5.8x the next 30 days' demand".
+
+**6. Overstock model.** A second LightGBM classifier on the same features and with the same split and calibration answers: *will stock on hand + inbound still not be used up by actual demand over the next 120 days?* (`overstock_probability`). 50% or more = **Possible overstock**, unless the stockout model says High risk or Watch. It is compared with the old rule (120 or more days of stock at recent sales); unlike the rule, it also sees inbound stock, trends and seasonality. The 120 days and the 50% threshold are constants at the top of `ml_risk.py`.
 
 ## Plain-English explanations (`explain.py`)
 
@@ -172,58 +183,69 @@ generate_data.py ──► data/ ──┬─► stock_sim.py ─► stock_histo
 |---|---|
 | `sku_forecast.csv` | Weekly P50 / P90 per SKU for the next 13 weeks |
 | `order_volume_forecast.csv` | Weekly units and orders (P50 / P90) per client / warehouse / channel |
-| `inventory_risk.csv` | One row per SKU: available stock, days of cover, stockout dates, `risk_state`, `risk_probability`, `top_drivers`, `rule_risk_state`, reason, reorder qty, and the next open ASN (`covered_by_asn`, `next_asn_date`, `asn_arrives_in_time`) |
-| `forecast_vs_actual.csv` | Last 14 days per client / warehouse: orders received vs forecast, variance %, status |
-| `backtest_accuracy.csv` | Per-SKU forecast vs actual on both backtest windows |
+| `order_forecast.csv` | Direct ML forecast of weekly orders (P50 / P90) per client / warehouse / channel; its P90 is used in `order_volume_forecast.csv` |
+| `inventory_risk.csv` | One row per SKU: available stock, days of cover, stockout dates, `risk_state`, `risk_probability`, `top_drivers`, `rule_risk_state`, reason, reorder qty, and the next open ASN (`covered_by_asn`, `next_asn_date`, `supplier_delay_days`, `next_asn_likely_date`, `asn_arrives_in_time`) |
+| `forecast_vs_actual.csv` | Last 14 days per client / warehouse: orders received vs the ML forecast, variance %, status |
+| `fva_forecast.csv` | The ML forecast for those 14 days, made from data before them (`forecast_data_to`) |
+| `backtest_accuracy.csv` | Per-SKU forecast vs actual on each of the 8 backtest windows |
+| `forecast_ledger.csv` | Every live forecast made so far (one set per as-of date) |
+| `forecast_accuracy_tracking.csv` | Past live forecasts scored against actuals, per forecast date and weeks ahead |
 | `feature_importance.csv` | Which features drive the demand model (LightGBM / XGBoost only) |
-| `summary.json` | Backtest scores for SKU demand, Order Volume and Shortfall Risk |
-| `risk_summary.json` | Risk method, count of SKUs per level, `shortfall_risk_skus`, forecast-vs-actual status |
+| `summary.json` | Backtest scores for SKU demand, Order Volume and Shortfall Risk: last 13 weeks, last peak season, average of all windows, and each window; P90 factors |
+| `risk_summary.json` | Risk method, count of SKUs per level, `shortfall_risk_skus`, forecast-vs-actual status, live forecast accuracy |
 
 `outputs/ml_risk/` (shared by all forecast models):
 
 | File | Contents |
 |---|---|
 | `model.joblib` | The trained risk model and its calibrator (a saved binary; `risk.py` loads it) |
-| `metrics.json` | ML vs rule scores on the validation and test periods |
+| `metrics.json` | Stockout model: ML vs rule vs projection scores on the validation and test periods, and predicted vs actual stockout rate per risk level. `overstock`: the same for the overstock model vs the 120-day rule |
 | `feature_importance.csv` | Which features the risk model relies on |
 | `explanations.json` | Cached plain-English explanations |
 
-`outputs/model_comparison.csv` puts every forecast model side by side, per deliverable, with the naive benchmark.
+`outputs/model_comparison.csv` puts every forecast model side by side, per deliverable, with both benchmarks.
 
 ## Measures
 
 - **WAPE:** total absolute error ÷ total actual. Lower is better.
 - **P90 coverage:** the share of cases where actual stayed at or below P90. It should be close to 90%.
 - **Naive benchmark:** "the last 4 weeks' average continues". Every forecast model must beat it.
+- **Same week last year:** the second benchmark, the fair one for peak season.
 - **Average precision (PR-AUC):** how well the risk model ranks SKUs that really ran out above those that didn't. Higher is better.
-- **Recall:** the share of real stockouts that were flagged. ML and the rule are compared when flagging the same number of SKU-weeks.
+- **Recall:** the share of real stockouts that were flagged. ML and the rule are compared when flagging the same number of SKU-days.
 - **Demand-forecast "Shortfall Risk" score:** a proxy that compares forecast and actual demand over each SKU's lead time.
 
 ## Results on the synthetic data (run dated 2026-10-22)
 
 Numbers change slightly with the run date.
 
-**Demand forecast, WAPE** (normal weeks / peak season, lower is better):
+**Demand forecast, WAPE** (average of 8 backtest windows, lower is better):
 
-| | LightGBM | XGBoost | Chronos-2 | Stats | Naive |
-|---|---|---|---|---|---|
-| Order Volume | 16.3% / 15.1% | 15.5% / 18.0% | **15.1%** / 18.7% | 19.3% / **14.4%** | 17.1% / 32.3% |
-| Shortfall Risk (proxy) | 14.2% / 13.9% | 13.4% / **12.4%** | **10.9%** / 15.1% | 11.8% / 14.7% | 15.5% / 18.1% |
+| | LightGBM | XGBoost | Chronos-2 | Stats | Ensemble | Naive | Same week last year |
+|---|---|---|---|---|---|---|---|
+| Order Volume | 13.0% | 13.1% | 13.7% | 14.6% | **12.3%** | 17.9% | 19.4% |
+| Shortfall Risk (proxy) | 13.4% | 13.3% | 12.7% | 14.0% | **12.6%** | 15.4% | 18.5% |
+| SKU demand | 20.2% | 20.2% | 20.7% | 23.4% | **19.7%** | 24.7% | 28.2% |
 
-- **No single winner:** the best model differs by deliverable and period.
-- In peak season every model beats the naive benchmark by a wide margin on order volume.
-- **P90 coverage** is close to the 90% target on order volume (about 83–99%) but below it at SKU level in peak season (about 71–78%).
+- **The ensemble is the most accurate overall on order volume and SKU demand** (Chronos-2 is slightly better on the shortfall proxy), though single models still win some individual windows (for example LightGBM on order volume in the last 13 weeks).
+- Before the October 2026 changes, LightGBM averaged 22.6% SKU-demand WAPE over the same 8 windows. Now it averages 20.2%. Most of the gain comes from predicting demand relative to each SKU's level, then from same-week-last-year features and tuning.
+- **P90 coverage at SKU level is now about 90%** for every model (it was 71–82% in peak season and 82–85% overall). Peak season is still a little short (84–89%).
+- **Order Volume P90 coverage is now about 89%** for every model (it was about 97–98% when SKU P90s were added up). Last year's peak season is lower (79–81%, stats 90%).
 
 **ML stockout risk vs the old rule** (average precision, higher is better):
 
 | Period | Stockout rate | ML | Rule | ML recall | Rule recall |
 |---|---|---|---|---|---|
-| Validation | 21% | **0.74** | 0.58 | 95% | 79% |
-| Test (most recent 9 months) | 13% | **0.59** | 0.48 | 97% | 82% |
+| Validation | 24% | **0.79** | 0.61 | 98% | 81% |
+| Test (most recent 9 months) | 14% | **0.65** | 0.47 | 96% | 83% |
 
-Recall compares both methods flagging the same number of SKU-weeks. The ML model ranks real stockouts above false alarms better than the rule does.
+Recall compares both methods flagging the same number of SKU-days. On the test period, average precision went from 0.59 before the October 2026 changes to 0.65. Nearly all of that gain comes from training on several simulated planning policies. Predicted chances now match actual stockout rates within each risk level (see `by_level` in `metrics.json`).
 
-The risk model does not depend on the forecast model, so all four forecast models report the same risk counts (today: 9 High risk, 0 Watch, 8 Monitor, 38 Healthy, 5 Possible overstock).
+**ML overstock vs the old 120-day rule** (test period, average precision, higher is better): ML **0.75**, rule 0.28. Flagging the same number of SKU-days, ML catches 75% of real overstock and the rule 40%. Overstock is rare in the simulated history (about 3% of test rows), so these numbers are noisier than the stockout ones.
+
+The risk models do not depend on the forecast model, so all forecast models report the same risk counts (today: 13 High risk, 0 Watch, 3 Monitor, 38 Healthy, 6 Possible overstock). The extra overstock item has only 58 days of stock on hand but a large inbound shipment, which the old rule did not look at.
+
+**Forecast vs actual (last 14 days):** the ML forecast is 3–8% below orders received across models (On track). Day by day per client / warehouse, its error is 34% against 40% for the old 4-week weekday average.
 
 ## Limitations
 
@@ -233,16 +255,19 @@ The risk model does not depend on the forecast model, so all four forecast model
 - **Slow-moving SKUs** have high weekly error in every demand model.
 - **Risk is independent of the forecast model.** The forecast models drive the chart, stockout dates and reorder quantities, not the risk probability.
 - The demand-forecast shortfall score is a proxy for the same reason as above: a true alert backtest needs real historical stock.
+- **Supplier delays and past stockouts at the as-of date come from the simulation** (both for the risk model and for `next_asn_likely_date`), while stock comes from the real snapshot. Real ASN receipt dates would replace them.
+- **Shipped units understate demand while an item is out of stock.** With real data, add stockout flags so those days can be excluded or corrected before training.
+- **Order volume P90 in peak season** is still a little low (about 79% in last year's peak window), because only a few peak weeks exist to size it from.
 
 ## Project layout
 
 ```
 config.py            settings; reads FORECAST_MODEL and RISK_METHOD from .env
 generate_data.py     synthetic dataset (dated to today) -> data/
-stock_sim.py         simulated weekly stock history -> data/stock_history.csv
-ml_risk.py           ML stockout-risk model: train, evaluate, score
+stock_sim.py         simulated daily stock history (5 planning policies) -> data/stock_history.csv
+ml_risk.py           ML stockout and overstock models: train, evaluate, score
 forecast.py          weekly demand forecast + backtest (model-agnostic)
-models/              lgbm.py, xgb.py, chronos.py, stats.py
+models/              lgbm.py, xgb.py, chronos.py, stats.py, ensemble.py
 risk.py              order volume + shortfall risk (ML levels, reorder, ASN cover, forecast vs actual)
 explain.py           plain-English explanations (GPT-4o / Azure OpenAI)
 build_xlsx.py        Excel workbook per model

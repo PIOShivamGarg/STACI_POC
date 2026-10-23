@@ -8,12 +8,21 @@ const PAGE = 12;
 
 export function asnStatus(r: RiskRow): { text: string; tone: "ok" | "warn" | "crit" } {
   if (!r.covered_by_asn) return { text: "No inbound ASN", tone: "crit" };
-  const when = `${r.covered_by_asn} (ETA ${fmtDate(r.next_asn_date)})`;
+  // "likely" = due date plus the supplier's recent lateness; it decides whether the ASN arrives in time
+  const late = r.next_asn_likely_date && r.next_asn_likely_date !== r.next_asn_date;
+  const eta = late ? `ETA ${fmtDate(r.next_asn_date)}, likely ${fmtDate(r.next_asn_likely_date)}` : `ETA ${fmtDate(r.next_asn_date)}`;
+  const when = `${r.covered_by_asn} (${eta})`;
   return r.asn_arrives_in_time ? { text: `Covered by ${when}`, tone: "ok" } : { text: `${when} — after stockout`, tone: "warn" };
 }
 
 export function runsOut(r: RiskRow): string {
   return r.projected_stockout_p50 ? `Runs out around ${fmtDate(r.projected_stockout_p50)}` : "No stockout in the next 13 weeks";
+}
+
+// overstock rows show the chance of overstock, every other row the chance of running out
+export function chanceText(r: RiskRow): string | null {
+  const p = r.risk_state === "Possible overstock" ? r.overstock_probability : r.risk_probability;
+  return p != null ? `${Math.round(p * 100)}% chance` : null;
 }
 
 function Why({ r }: { r: RiskRow }) {
@@ -36,7 +45,7 @@ function Row({ r }: { r: RiskRow }) {
   const [open, setOpen] = useState(false);
   const asn = asnStatus(r);
   const cover = r.days_of_cover < 1 ? "<1 day" : `${Math.round(r.days_of_cover)} days`;
-  const hasProb = r.risk_probability != null;
+  const prob = chanceText(r);
   return (
     <div className="lrow-wrap">
     <div className="lrow">
@@ -50,7 +59,7 @@ function Row({ r }: { r: RiskRow }) {
       <span className="actions">
         <span className="pillcol">
           <Pill tone={LEVEL_PILL[r.risk_state]}>{r.risk_state}</Pill>
-          {hasProb && <span className="tiny muted">{Math.round(r.risk_probability! * 100)}% chance</span>}
+          {prob && <span className="tiny muted">{prob}</span>}
         </span>
         <button className="btn sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? "Hide" : "Why?"}</button>
         <button className="btn sm" disabled title="Item pages are not part of this prototype">Open item</button>

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from chronos import Chronos2Pipeline
 
-METHOD_VERSION = "chronos2-v0.1"
+METHOD_VERSION = "chronos2-v0.2"
 MODEL_ID = "amazon/chronos-2"
 DEVICE = "cpu"
 QUANTILES = [0.5, 0.9]
